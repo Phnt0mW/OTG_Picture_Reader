@@ -128,6 +128,20 @@ class MainViewModel(
         repository.scanImages()
     }
 
+    fun hasMtpDeviceAccess(): Boolean {
+        return repository.hasMtpDeviceAccess()
+    }
+
+    fun scanMtpImages() {
+        AppLog.i("ViewModel", "scanMtpImages")
+        repository.scanMtpImages()
+    }
+
+    fun stopCameraScan() {
+        AppLog.i("ViewModel", "stopCameraScan")
+        repository.stopCameraScan()
+    }
+
     fun toggleSortOrder() {
         AppLog.i("ViewModel", "toggleSortOrder current=${sortDescending.value}")
         sortDescending.value = !sortDescending.value

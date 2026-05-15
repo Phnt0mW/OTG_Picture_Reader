@@ -1,14 +1,21 @@
 package com.example.otg_picture_reader
 
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.UsbManager
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -40,7 +47,6 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
@@ -49,8 +55,9 @@ import androidx.compose.material3.BottomSheetScaffold
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -60,6 +67,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
@@ -99,8 +107,11 @@ import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.max
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
+
+private const val ACTION_USB_PERMISSION = "com.example.otg_picture_reader.USB_PERMISSION"
 
 private data class AppDialogState(
     val title: String,
@@ -112,18 +123,104 @@ class MainActivity : ComponentActivity() {
         MainViewModel.factory(application)
     }
 
+    private val usbPermissionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != ACTION_USB_PERMISSION) return
+            val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+            AppLog.i("Activity", "usb permission result granted=$granted")
+            if (granted || viewModel.hasMtpDeviceAccess()) {
+                viewModel.scanMtpImages()
+            } else {
+                Toast.makeText(context, "未获得 USB 设备访问权限", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private val usbAttachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != UsbManager.ACTION_USB_DEVICE_ATTACHED) return
+            AppLog.i("Activity", "usb device attached, auto scan")
+            requestMtpScan(showNoDeviceToast = false)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ContextCompat.registerReceiver(
+            this,
+            usbPermissionReceiver,
+            IntentFilter(ACTION_USB_PERMISSION),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            this,
+            usbAttachReceiver,
+            IntentFilter(UsbManager.ACTION_USB_DEVICE_ATTACHED),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         enableEdgeToEdge()
         setContent {
             OTG_Picture_ReaderTheme {
                 OtgPictureReaderApp(
                     viewModel = viewModel,
                     onShareImage = ::shareImage,
-                    onShareImages = ::shareImages
+                    onShareImages = ::shareImages,
+                    onScanMtpDevice = ::requestMtpScan,
+                    onStopCameraScan = viewModel::stopCameraScan
                 )
             }
         }
+        handleUsbAttachIntent(intent)
+    }
+
+    override fun onDestroy() {
+        unregisterReceiver(usbPermissionReceiver)
+        unregisterReceiver(usbAttachReceiver)
+        super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleUsbAttachIntent(intent)
+    }
+
+    private fun handleUsbAttachIntent(intent: Intent?) {
+        if (intent?.action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
+            AppLog.i("Activity", "launched from usb attach intent")
+            requestMtpScan(showNoDeviceToast = false)
+        }
+    }
+
+    private fun requestMtpScan(showNoDeviceToast: Boolean = true) {
+        val scanner = (application as OtgPictureReaderApp).appContainer.mtpImageScanner
+        val device = scanner.findCandidateDevice()
+        if (device == null) {
+            AppLog.w("Activity", "requestMtpScan no candidate device")
+            if (showNoDeviceToast) {
+                Toast.makeText(this, "没有发现可读取的 PTP/MTP 设备", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        if (scanner.hasPermission(device)) {
+            AppLog.i("Activity", "requestMtpScan permission already granted")
+            viewModel.scanMtpImages()
+            return
+        }
+
+        AppLog.i("Activity", "requestMtpScan request permission device=${device.deviceName}")
+        val intent = Intent(ACTION_USB_PERMISSION).apply {
+            setPackage(packageName)
+            putExtra(UsbManager.EXTRA_DEVICE, device)
+        }
+        val pendingIntent = android.app.PendingIntent.getBroadcast(
+            this,
+            0,
+            intent,
+            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_MUTABLE
+        )
+        val usbManager = getSystemService(USB_SERVICE) as UsbManager
+        usbManager.requestPermission(device, pendingIntent)
     }
 
     private fun shareImage(uri: Uri) {
@@ -142,13 +239,16 @@ class MainActivity : ComponentActivity() {
 private fun OtgPictureReaderApp(
     viewModel: MainViewModel,
     onShareImage: (Uri) -> Unit,
-    onShareImages: (List<Uri>) -> Unit
+    onShareImages: (List<Uri>) -> Unit,
+    onScanMtpDevice: () -> Unit,
+    onStopCameraScan: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var activeDialog by remember { mutableStateOf<AppDialogState?>(null) }
+    var isSettingsMenuOpen by remember { mutableStateOf(false) }
     var showLogLocationPrompt by rememberSaveable {
         mutableStateOf(AppLog.shouldPromptForLogLocation(context))
     }
@@ -224,38 +324,107 @@ private fun OtgPictureReaderApp(
         }
     }
 
+    BackHandler(enabled = uiState.selectedImage != null || uiState.isSelectionMode) {
+        when {
+            uiState.selectedImage != null -> viewModel.closePreview()
+            uiState.isSelectionMode -> viewModel.clearSelection()
+        }
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            CenterAlignedTopAppBar(
+            val isOtgSource = uiState.rootUri != null
+            TopAppBar(
                 title = {
                     Text(
                         when {
                             uiState.selectedImage != null -> "${uiState.previewIndex + 1}/${uiState.images.size}"
                             uiState.isSelectionMode -> "已选择 ${uiState.selectedCount} 张"
-                            else -> "OTG 图片浏览"
-                        }
+                            else -> rememberSourceName(uiState.rootUri, uiState.scanState.isScanning)
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 },
-                navigationIcon = {
-                    when {
-                        uiState.selectedImage != null -> {
-                            TextButton(onClick = viewModel::closePreview) { Text("返回") }
-                        }
-
-                        uiState.isSelectionMode -> {
-                            TextButton(onClick = viewModel::clearSelection) { Text("取消") }
-                        }
-                    }
-                },
                 actions = {
-                    if (uiState.selectedImage == null) {
-                        TextButton(onClick = { showLogLocationPrompt = true }) {
-                            Text("日志")
+                    val previewImage = uiState.selectedImage
+                    if (previewImage != null) {
+                        val isCurrentSelected = previewImage.id in uiState.selectedImageIds
+                        TextButton(onClick = viewModel::toggleSelectionFromPreview) {
+                            Text(if (isCurrentSelected) "取消选择" else "选择")
                         }
-                        TextButton(onClick = { treePicker.launch(null) }) {
-                            Text("选择 OTG")
+                    } else {
+                        Box {
+                            TextButton(onClick = { isSettingsMenuOpen = true }) {
+                                Text("设置")
+                            }
+                            DropdownMenu(
+                                expanded = isSettingsMenuOpen,
+                                onDismissRequest = { isSettingsMenuOpen = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            when {
+                                                uiState.scanState.isScanning && !isOtgSource -> "停止扫描"
+                                                isOtgSource -> "重新扫描 OTG"
+                                                else -> "扫描相机"
+                                            }
+                                        )
+                                    },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        if (uiState.scanState.isScanning && !isOtgSource) {
+                                            onStopCameraScan()
+                                        } else if (isOtgSource) {
+                                            viewModel.scanImages()
+                                        } else {
+                                            onScanMtpDevice()
+                                        }
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("选择 OTG 目录") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        treePicker.launch(null)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (isOtgSource) "扫描相机" else "选择 OTG 后扫描") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        if (isOtgSource) onScanMtpDevice() else treePicker.launch(null)
+                                    },
+                                    enabled = !uiState.scanState.isScanning
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(if (uiState.sortDescending) "排序：最早在前" else "排序：最新在前") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        viewModel.toggleSortOrder()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("日志位置") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        showLogLocationPrompt = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("清除当前来源") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        viewModel.clearRootSelection()
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("已清除当前缓存")
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -271,12 +440,10 @@ private fun OtgPictureReaderApp(
                     .padding(innerPadding),
                 onClose = viewModel::closePreview,
                 onOpenIndex = viewModel::openImageAt,
-                onToggleCurrentSelection = viewModel::toggleSelectionFromPreview,
                 onSaveCurrent = viewModel::saveSelectedImage,
                 onShareCurrent = viewModel::shareSelectedImage,
                 onSaveSelected = viewModel::saveSelectedImages,
                 onShareSelected = viewModel::shareSelectedImages,
-                onClearSelection = viewModel::clearSelection,
                 onReportError = { message -> activeDialog = AppDialogState("预览异常", message) }
             )
         } else {
@@ -286,8 +453,9 @@ private fun OtgPictureReaderApp(
                     .fillMaxSize()
                     .padding(innerPadding),
                 onPickRoot = { treePicker.launch(null) },
-                onRescan = viewModel::scanImages,
-                onToggleSort = viewModel::toggleSortOrder,
+                onScanMtpDevice = onScanMtpDevice,
+                onStopCameraScan = onStopCameraScan,
+                onRescanOtg = viewModel::scanImages,
                 onImageClick = { image ->
                     AppLog.d("UI", "gallery image click id=${image.id} selectionMode=${uiState.isSelectionMode}")
                     viewModel.openImage(image.id)
@@ -298,13 +466,6 @@ private fun OtgPictureReaderApp(
                         viewModel.selectOnly(image.id)
                     } else {
                         viewModel.toggleImageSelection(image.id)
-                    }
-                },
-                onClearRoot = {
-                    AppLog.i("UI", "clearRoot clicked")
-                    viewModel.clearRootSelection()
-                    scope.launch {
-                        snackbarHostState.showSnackbar("已清除当前 OTG 目录缓存")
                     }
                 },
                 onSaveSelected = viewModel::saveSelectedImages,
@@ -338,29 +499,65 @@ private fun OtgPictureReaderApp(
     }
 }
 
+@Composable
+private fun rememberSourceName(rootUri: String?, isScanning: Boolean): String {
+    val context = LocalContext.current
+    return remember(rootUri, isScanning) {
+        rootUri?.let { uri ->
+            DocumentFile.fromTreeUri(context, Uri.parse(uri))?.name ?: "OTG 目录"
+        } ?: if (isScanning) {
+            "相机正在读取"
+        } else {
+            "相机/PTP/MTP 设备"
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun GalleryScreen(
     state: MainUiState,
     modifier: Modifier = Modifier,
     onPickRoot: () -> Unit,
-    onRescan: () -> Unit,
-    onToggleSort: () -> Unit,
+    onScanMtpDevice: () -> Unit,
+    onStopCameraScan: () -> Unit,
+    onRescanOtg: () -> Unit,
     onImageClick: (OtgImage) -> Unit,
     onImageLongClick: (OtgImage) -> Unit,
-    onClearRoot: () -> Unit,
     onSaveSelected: () -> Unit,
     onShareSelected: () -> Unit,
     onClearSelection: () -> Unit
 ) {
-    if (state.rootUri == null) {
+    if (state.rootUri == null && state.images.isEmpty()) {
         AppLog.w("UI", "gallery return: rootUri is null")
         EmptyState(
             modifier = modifier,
-            title = "还没有连接到 OTG 目录",
-            description = "先选择 OTG 设备目录，应用会扫描全部图片并优先生成缩略图。",
+            title = "还没有连接到图片来源",
+            description = if (state.scanState.isScanning) {
+                state.scanState.statusMessage
+            } else {
+                "可以选择 OTG 目录，也可以直接扫描已连接的相机/PTP/MTP 设备。"
+            },
             actionLabel = "选择 OTG 目录",
-            onAction = onPickRoot
+            onAction = onPickRoot,
+            isLoading = state.scanState.isScanning,
+            secondaryActionLabel = if (state.scanState.isScanning) "停止扫描" else "扫描相机",
+            onSecondaryAction = {
+                if (state.scanState.isScanning) onStopCameraScan() else onScanMtpDevice()
+            }
+        )
+        return
+    }
+
+    if (state.rootUri != null && state.images.isEmpty() && !state.scanState.isScanning) {
+        EmptyState(
+            modifier = modifier,
+            title = "当前来源还没有图片",
+            description = "可以重新扫描这个 OTG 目录，也可以切换到相机或其他目录。",
+            actionLabel = "重新扫描 OTG",
+            onAction = onRescanOtg,
+            secondaryActionLabel = "扫描相机",
+            onSecondaryAction = onScanMtpDevice
         )
         return
     }
@@ -372,12 +569,8 @@ private fun GalleryScreen(
         StatusCard(
             rootUri = state.rootUri,
             scanState = state.scanState,
-            sortDescending = state.sortDescending,
             isSelectionMode = state.isSelectionMode,
             selectedCount = state.selectedCount,
-            onRescan = onRescan,
-            onToggleSort = onToggleSort,
-            onClearRoot = onClearRoot,
             onSaveSelected = onSaveSelected,
             onShareSelected = onShareSelected,
             onClearSelection = onClearSelection
@@ -389,8 +582,8 @@ private fun GalleryScreen(
                 modifier = Modifier.fillMaxSize(),
                 title = "还没有图片",
                 description = "当前目录还没扫到图片。你可以重新扫描，或者换一个 OTG 根目录。",
-                actionLabel = "重新扫描",
-                onAction = onRescan
+                actionLabel = if (state.rootUri != null) "重新扫描 OTG" else "扫描相机",
+                onAction = if (state.rootUri != null) onRescanOtg else onScanMtpDevice
             )
         } else {
             LazyVerticalGrid(
@@ -415,25 +608,22 @@ private fun GalleryScreen(
 
 @Composable
 private fun StatusCard(
-    rootUri: String,
+    rootUri: String?,
     scanState: ScanState,
-    sortDescending: Boolean,
     isSelectionMode: Boolean,
     selectedCount: Int,
-    onRescan: () -> Unit,
-    onToggleSort: () -> Unit,
-    onClearRoot: () -> Unit,
     onSaveSelected: () -> Unit,
     onShareSelected: () -> Unit,
     onClearSelection: () -> Unit
 ) {
     val context = LocalContext.current
     val rootName = remember(rootUri) {
-        DocumentFile.fromTreeUri(context, Uri.parse(rootUri))?.name ?: "OTG 根目录"
+        rootUri?.let { DocumentFile.fromTreeUri(context, Uri.parse(it))?.name } ?: "相机/PTP/MTP 设备"
     }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape = MaterialTheme.shapes.large
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -466,12 +656,6 @@ private fun StatusCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                AssistChip(
-                    onClick = onToggleSort,
-                    label = { Text(if (sortDescending) "时间: 最新在前" else "时间: 最早在前") }
-                )
-                AssistChip(onClick = onRescan, label = { Text("重新扫描") })
-                AssistChip(onClick = onClearRoot, label = { Text("清除目录") })
                 if (isSelectionMode) {
                     AssistChip(onClick = onSaveSelected, label = { Text("批量保存") })
                     AssistChip(onClick = onShareSelected, label = { Text("批量分享") })
@@ -498,7 +682,7 @@ private fun ImageCard(
                 onClick = onClick,
                 onLongClick = onLongClick
             ),
-        shape = RoundedCornerShape(18.dp)
+        shape = MaterialTheme.shapes.large
     ) {
         Column {
             Box {
@@ -554,12 +738,10 @@ private fun PreviewScreen(
     modifier: Modifier = Modifier,
     onClose: () -> Unit,
     onOpenIndex: (Int) -> Unit,
-    onToggleCurrentSelection: () -> Unit,
     onSaveCurrent: () -> Unit,
     onShareCurrent: () -> Unit,
     onSaveSelected: () -> Unit,
     onShareSelected: () -> Unit,
-    onClearSelection: () -> Unit,
     onReportError: (String) -> Unit
 ) {
     AppLog.d("Preview", "enter preview size=${state.images.size} previewIndex=${state.previewIndex}")
@@ -605,6 +787,7 @@ private fun PreviewScreen(
         return
     }
     val currentSelected = currentImage.id in state.selectedImageIds
+    var isCurrentImageZoomed by remember(currentImage.id) { mutableStateOf(false) }
     val bottomSheetState = rememberStandardBottomSheetState(
         initialValue = SheetValue.PartiallyExpanded,
         skipHiddenState = true
@@ -615,7 +798,7 @@ private fun PreviewScreen(
         scaffoldState = bottomSheetScaffoldState,
         modifier = modifier.background(Color(0xFF0D1117)),
         sheetPeekHeight = 76.dp,
-        sheetShape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
+        sheetShape = MaterialTheme.shapes.extraLarge,
         sheetContainerColor = MaterialTheme.colorScheme.surface,
         sheetDragHandle = {
             BottomSheetDefaults.DragHandle(
@@ -630,7 +813,6 @@ private fun PreviewScreen(
                 isSelected = currentSelected,
                 selectionMode = state.isSelectionMode,
                 selectionCount = state.selectedCount,
-                onToggleCurrentSelection = onToggleCurrentSelection,
                 onSaveCurrent = onSaveCurrent,
                 onShareCurrent = onShareCurrent,
                 onSaveSelected = onSaveSelected,
@@ -645,6 +827,7 @@ private fun PreviewScreen(
         ) {
             HorizontalPager(
                 state = pagerState,
+                userScrollEnabled = !isCurrentImageZoomed,
                 modifier = Modifier.fillMaxSize()
             ) { page ->
                 state.images.getOrNull(page)?.let { image ->
@@ -652,28 +835,13 @@ private fun PreviewScreen(
                     ZoomableImage(
                         image = image,
                         modifier = Modifier.fillMaxSize(),
+                        onZoomChanged = { zoomed ->
+                            if (page == pagerState.currentPage) {
+                                isCurrentImageZoomed = zoomed
+                            }
+                        },
                         onError = { message -> onReportError(message) }
                     )
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .fillMaxWidth()
-                    .windowInsetsPadding(WindowInsets.statusBars)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(onClick = onClose) { Text("返回", color = Color.White) }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (state.isSelectionMode) {
-                        TextButton(onClick = onClearSelection) { Text("清空", color = Color.White) }
-                    }
-                    TextButton(onClick = onToggleCurrentSelection) {
-                        Text(if (currentSelected) "取消选择" else "选择", color = Color.White)
-                    }
                 }
             }
 
@@ -682,7 +850,7 @@ private fun PreviewScreen(
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 86.dp),
                 color = Color.Black.copy(alpha = 0.42f),
-                shape = RoundedCornerShape(999.dp)
+                shape = MaterialTheme.shapes.extraLarge
             ) {
                 Text(
                     text = "${pagerState.currentPage + 1}/${state.images.size}",
@@ -699,25 +867,37 @@ private fun PreviewScreen(
 private fun ZoomableImage(
     image: OtgImage,
     modifier: Modifier = Modifier,
+    onZoomChanged: (Boolean) -> Unit = {},
     onError: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val imageUri = remember(image.documentUri) { Uri.parse(image.documentUri) }
-    val imageRequest = remember(context, imageUri) {
+    val imageModel = remember(image.thumbnailPath, image.documentUri) {
+        image.thumbnailPath?.let { File(it) } ?: Uri.parse(image.documentUri)
+    }
+    val imageRequest = remember(context, imageModel) {
         ImageRequest.Builder(context)
-            .data(imageUri)
+            .data(imageModel)
             .allowHardware(false)
             .crossfade(false)
             .build()
     }
     var scale by rememberSaveable(image.id) { mutableFloatStateOf(1f) }
     var offset by remember(image.id) { mutableStateOf(Offset.Zero) }
-    AppLog.d("Preview", "ZoomableImage model imageId=${image.id} uri=$imageUri")
+    val imageAspectRatio = remember(image.width, image.height, image.exifInfo) {
+        val width = image.width ?: image.exifInfo?.width
+        val height = image.height ?: image.exifInfo?.height
+        if (width != null && height != null && width > 0 && height > 0) {
+            width.toFloat() / height.toFloat()
+        } else {
+            null
+        }
+    }
+    AppLog.d("Preview", "ZoomableImage model imageId=${image.id} model=$imageModel")
 
     Box(
         modifier = modifier
             .background(Color.Black)
-            .pointerInput(image.id, scale) {
+            .pointerInput(image.id, imageAspectRatio) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     do {
@@ -725,18 +905,37 @@ private fun ZoomableImage(
                         val pressedPointers = event.changes.count { it.pressed }
                         val zoom = event.calculateZoom()
                         val pan = event.calculatePan()
+                        val shouldHandleGesture = pressedPointers > 1 || scale > 1f
 
-                        if (pressedPointers > 1 || scale > 1f) {
+                        if (shouldHandleGesture) {
+                            val previousScale = scale
                             val nextScale = (scale * zoom).coerceIn(1f, 5f)
-                            scale = nextScale
-                            offset = if (nextScale == 1f) {
+                            val nextOffset = if (nextScale == 1f) {
                                 Offset.Zero
                             } else {
-                                offset + pan
+                                val scaledOffset = offset * (nextScale / scale)
+                                coerceImageOffset(
+                                    offset = scaledOffset + pan,
+                                    scale = nextScale,
+                                    containerWidth = size.width.toFloat(),
+                                    containerHeight = size.height.toFloat(),
+                                    imageAspectRatio = imageAspectRatio
+                                )
                             }
+
+                            if ((previousScale > 1f) != (nextScale > 1f)) {
+                                onZoomChanged(nextScale > 1f)
+                            }
+                            scale = nextScale
+                            offset = nextOffset
                             event.changes.forEach { change -> change.consume() }
                         }
                     } while (event.changes.any { it.pressed })
+
+                    if (scale == 1f) {
+                        offset = Offset.Zero
+                        onZoomChanged(false)
+                    }
                 }
             },
         contentAlignment = Alignment.Center
@@ -764,6 +963,43 @@ private fun ZoomableImage(
         )
     }
 }
+
+private fun coerceImageOffset(
+    offset: Offset,
+    scale: Float,
+    containerWidth: Float,
+    containerHeight: Float,
+    imageAspectRatio: Float?
+): Offset {
+    if (scale <= 1f || containerWidth <= 0f || containerHeight <= 0f) {
+        return Offset.Zero
+    }
+
+    val fittedImageWidth: Float
+    val fittedImageHeight: Float
+    if (imageAspectRatio != null) {
+        val containerAspectRatio = containerWidth / containerHeight
+        if (imageAspectRatio > containerAspectRatio) {
+            fittedImageWidth = containerWidth
+            fittedImageHeight = containerWidth / imageAspectRatio
+        } else {
+            fittedImageHeight = containerHeight
+            fittedImageWidth = containerHeight * imageAspectRatio
+        }
+    } else {
+        fittedImageWidth = containerWidth
+        fittedImageHeight = containerHeight
+    }
+
+    val maxOffsetX = max(0f, (fittedImageWidth * scale - containerWidth) / 2f)
+    val maxOffsetY = max(0f, (fittedImageHeight * scale - containerHeight) / 2f)
+
+    return Offset(
+        x = offset.x.coerceIn(-maxOffsetX, maxOffsetX),
+        y = offset.y.coerceIn(-maxOffsetY, maxOffsetY)
+    )
+}
+
 @Composable
 private fun PreviewUnavailableState(
     modifier: Modifier = Modifier,
@@ -854,7 +1090,6 @@ private fun PreviewDetailPanel(
     isSelected: Boolean,
     selectionMode: Boolean,
     selectionCount: Int,
-    onToggleCurrentSelection: () -> Unit,
     onSaveCurrent: () -> Unit,
     onShareCurrent: () -> Unit,
     onSaveSelected: () -> Unit,
@@ -890,9 +1125,6 @@ private fun PreviewDetailPanel(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            TextButton(onClick = onToggleCurrentSelection) {
-                Text(if (isSelected) "取消选择" else "选择", style = MaterialTheme.typography.labelMedium)
-            }
         }
 
         FlowRow(
@@ -915,7 +1147,9 @@ private fun PreviewDetailPanel(
                 detailLine("拍摄时间", exif.takenTime?.let(::formatTime))
             ))
             DetailSection("摄影参数", listOfNotNull(
-                detailLine("焦距", exif.focalLengthMm),
+                detailLine("实际焦距", exif.focalLengthMm),
+                detailLine("35mm 等效焦距", exif.focalLength35Mm),
+                detailLine("镜头规格", exif.lensSpecification),
                 detailLine("光圈", exif.aperture),
                 detailLine("快门", exif.shutterSpeed),
                 detailLine("ISO", exif.iso)
@@ -962,7 +1196,7 @@ private fun DetailSection(
     if (lines.isEmpty()) return
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape = RoundedCornerShape(8.dp)
+        shape = MaterialTheme.shapes.medium
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
@@ -1000,7 +1234,7 @@ private fun DetailSection(
 private fun DetailChip(label: String, value: String) {
     Surface(
         color = MaterialTheme.colorScheme.secondaryContainer,
-        shape = RoundedCornerShape(999.dp)
+        shape = MaterialTheme.shapes.extraLarge
     ) {
         Text(
             text = "$label  $value",
@@ -1035,7 +1269,10 @@ private fun EmptyState(
     title: String,
     description: String,
     actionLabel: String,
-    onAction: () -> Unit
+    onAction: () -> Unit,
+    isLoading: Boolean = false,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null
 ) {
     Box(
         modifier = modifier,
@@ -1056,9 +1293,19 @@ private fun EmptyState(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (isLoading) {
+                CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+            }
             Spacer(modifier = Modifier.height(4.dp))
-            Button(onClick = onAction) {
-                Text(actionLabel)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onAction) {
+                    Text(actionLabel)
+                }
+                if (secondaryActionLabel != null && onSecondaryAction != null) {
+                    Button(onClick = onSecondaryAction) {
+                        Text(secondaryActionLabel)
+                    }
+                }
             }
         }
     }

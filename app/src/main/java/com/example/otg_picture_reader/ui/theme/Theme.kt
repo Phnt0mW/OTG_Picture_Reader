@@ -9,28 +9,25 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
+    primary = TealMist90,
+    secondary = OceanAccent90,
+    tertiary = DeepSlate90,
+    background = DeepSlate10,
+    surface = Color(0xFF0F1D26),
+    surfaceVariant = Color(0xFF172933)
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
+    primary = TealMist10,
+    secondary = OceanAccent10,
+    tertiary = DeepSlate10,
+    background = Color(0xFFF7FAFB),
+    surface = Color(0xFFF3F7F9),
+    surfaceVariant = Color(0xFFE4EDF1)
 )
 
 @Composable
@@ -52,6 +49,7 @@ fun OTG_Picture_ReaderTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
+        shapes = AppShapes,
         typography = Typography,
         content = content
     )

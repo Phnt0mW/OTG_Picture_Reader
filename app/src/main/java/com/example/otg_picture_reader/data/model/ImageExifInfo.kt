@@ -6,6 +6,8 @@ data class ImageExifInfo(
     val cameraModel: String? = null,
     val lensModel: String? = null,
     val focalLengthMm: String? = null,
+    val focalLength35Mm: String? = null,
+    val lensSpecification: String? = null,
     val aperture: String? = null,
     val shutterSpeed: String? = null,
     val iso: String? = null,

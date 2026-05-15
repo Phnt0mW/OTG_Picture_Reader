@@ -3,4 +3,10 @@
     <cache-path
         name="shared_cache"
         path="shared/" />
+    <cache-path
+        name="mtp_images"
+        path="mtp_images/" />
+    <cache-path
+        name="ptp_images"
+        path="ptp_images/" />
 </paths>
