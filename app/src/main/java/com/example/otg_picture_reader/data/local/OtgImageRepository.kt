@@ -16,6 +16,7 @@ import com.example.otg_picture_reader.data.model.OtgImage
 import com.example.otg_picture_reader.data.model.ScanState
 import com.example.otg_picture_reader.data.usb.MtpImageScanner
 import com.example.otg_picture_reader.data.usb.PtpImageScanner
+import com.example.otg_picture_reader.data.usb.UsbCameraSessionLock
 import com.example.otg_picture_reader.data.usb.UsbScanPhase
 import com.example.otg_picture_reader.data.usb.UsbScanProgress
 import com.example.otg_picture_reader.util.AppLog
@@ -188,46 +189,51 @@ class OtgImageRepository(
                     ?: throw IllegalStateException("没有发现可读取的 PTP/MTP 设备")
                 val progressHandler = ::updateUsbScanProgress
                 val existingImages = _images.value.filter { image -> image.isCameraImage() }
-                runCatching {
-                    AppLog.i("Repository", "scanMtpImages try custom PTP")
-                    withTimeout(PTP_SCAN_TIMEOUT_MS) {
-                        ptpImageScanner.scanImages(
-                            device = device,
-                            existingImages = existingImages,
-                            onProgress = progressHandler,
-                            shouldStop = ::isCameraScanStopRequested
-                        )
-                    }
-                }.recoverCatching { ptpError ->
-                    if (ptpError is CancellationException || isCameraScanStopRequested()) {
-                        throw CancellationException("用户停止相机扫描")
-                    }
-                    AppLog.e("Repository", "custom PTP failed, fallback to MtpDevice", ptpError)
-                    _scanState.value = ScanState(
-                        isScanning = true,
-                        scannedCount = 0,
-                        indexedCount = 0,
-                        statusMessage = "PTP 读取失败，正在尝试 MTP 模式。"
-                    )
+                UsbCameraSessionLock.mutex.lock()
+                try {
                     runCatching {
+                        AppLog.i("Repository", "scanMtpImages try custom PTP")
                         withTimeout(PTP_SCAN_TIMEOUT_MS) {
-                            mtpImageScanner.scanImages(
+                            ptpImageScanner.scanImages(
+                                device = device,
                                 existingImages = existingImages,
                                 onProgress = progressHandler,
                                 shouldStop = ::isCameraScanStopRequested
                             )
                         }
-                    }.getOrElse { mtpError ->
-                        if (mtpError is CancellationException || isCameraScanStopRequested()) {
+                    }.recoverCatching { ptpError ->
+                        if (ptpError is CancellationException || isCameraScanStopRequested()) {
                             throw CancellationException("用户停止相机扫描")
                         }
-                        AppLog.e("Repository", "MtpDevice fallback failed", mtpError)
-                        throw IllegalStateException(
-                            "PTP 读取失败：${ptpError.message ?: "未知错误"}；MTP fallback 也失败：${mtpError.message ?: "未知错误"}",
-                            ptpError
+                        AppLog.e("Repository", "custom PTP failed, fallback to MtpDevice", ptpError)
+                        _scanState.value = ScanState(
+                            isScanning = true,
+                            scannedCount = 0,
+                            indexedCount = 0,
+                            statusMessage = "PTP 读取失败，正在尝试 MTP 模式。"
                         )
-                    }
-                }.getOrThrow()
+                        runCatching {
+                            withTimeout(PTP_SCAN_TIMEOUT_MS) {
+                                mtpImageScanner.scanImages(
+                                    existingImages = existingImages,
+                                    onProgress = progressHandler,
+                                    shouldStop = ::isCameraScanStopRequested
+                                )
+                            }
+                        }.getOrElse { mtpError ->
+                            if (mtpError is CancellationException || isCameraScanStopRequested()) {
+                                throw CancellationException("用户停止相机扫描")
+                            }
+                            AppLog.e("Repository", "MtpDevice fallback failed", mtpError)
+                            throw IllegalStateException(
+                                "PTP 读取失败：${ptpError.message ?: "未知错误"}；MTP fallback 也失败：${mtpError.message ?: "未知错误"}",
+                                ptpError
+                            )
+                        }
+                    }.getOrThrow()
+                } finally {
+                    UsbCameraSessionLock.mutex.unlock()
+                }
             }.onSuccess { indexedImages ->
                 if (isCameraScanStopRequested()) {
                     AppLog.i("Repository", "scanMtpImages stopped before final commit")

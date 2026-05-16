@@ -47,6 +47,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
@@ -60,6 +61,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SnackbarHost
@@ -71,6 +73,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberBottomSheetScaffoldState
 import androidx.compose.material3.rememberStandardBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -91,6 +94,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.documentfile.provider.DocumentFile
@@ -100,6 +104,8 @@ import coil.request.ImageRequest
 import com.example.otg_picture_reader.data.model.ImageExifInfo
 import com.example.otg_picture_reader.data.model.OtgImage
 import com.example.otg_picture_reader.data.model.ScanState
+import com.example.otg_picture_reader.feature.liveview.LiveViewScreen
+import com.example.otg_picture_reader.feature.liveview.LiveViewViewModel
 import com.example.otg_picture_reader.ui.theme.OTG_Picture_ReaderTheme
 import com.example.otg_picture_reader.util.AppLog
 import java.io.File
@@ -112,16 +118,25 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 private const val ACTION_USB_PERMISSION = "com.example.otg_picture_reader.USB_PERMISSION"
+private const val USB_ATTACH_DEBOUNCE_MS = 1_500L
 
 private data class AppDialogState(
     val title: String,
     val message: String
 )
 
+private enum class PendingUsbAction {
+    ScanImages,
+    StartLiveView
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels {
         MainViewModel.factory(application)
     }
+    private val liveViewViewModel: LiveViewViewModel by viewModels()
+    private var lastAutoScanRequestMs = 0L
+    private var pendingUsbAction: PendingUsbAction = PendingUsbAction.ScanImages
 
     private val usbPermissionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -129,7 +144,10 @@ class MainActivity : ComponentActivity() {
             val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
             AppLog.i("Activity", "usb permission result granted=$granted")
             if (granted || viewModel.hasMtpDeviceAccess()) {
-                viewModel.scanMtpImages()
+                when (pendingUsbAction) {
+                    PendingUsbAction.ScanImages -> viewModel.scanMtpImages()
+                    PendingUsbAction.StartLiveView -> liveViewViewModel.startLiveView()
+                }
             } else {
                 Toast.makeText(context, "未获得 USB 设备访问权限", Toast.LENGTH_SHORT).show()
             }
@@ -166,6 +184,8 @@ class MainActivity : ComponentActivity() {
                     onShareImage = ::shareImage,
                     onShareImages = ::shareImages,
                     onScanMtpDevice = ::requestMtpScan,
+                    liveViewViewModel = liveViewViewModel,
+                    onStartLiveView = ::requestLiveViewStart,
                     onStopCameraScan = viewModel::stopCameraScan
                 )
             }
@@ -193,6 +213,36 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestMtpScan(showNoDeviceToast: Boolean = true) {
+        requestUsbDeviceAccess(
+            action = PendingUsbAction.ScanImages,
+            showNoDeviceToast = showNoDeviceToast
+        )
+    }
+
+    private fun requestLiveViewStart() {
+        if (viewModel.uiState.value.scanState.isScanning) {
+            AppLog.w("Activity", "requestLiveViewStart ignored: camera scan is running")
+            Toast.makeText(this, "相机扫描正在进行，请先停止扫描后再打开监视器", Toast.LENGTH_SHORT).show()
+            return
+        }
+        requestUsbDeviceAccess(
+            action = PendingUsbAction.StartLiveView,
+            showNoDeviceToast = true
+        )
+    }
+
+    private fun requestUsbDeviceAccess(
+        action: PendingUsbAction,
+        showNoDeviceToast: Boolean = true
+    ) {
+        val now = System.currentTimeMillis()
+        if (!showNoDeviceToast && now - lastAutoScanRequestMs < USB_ATTACH_DEBOUNCE_MS) {
+            AppLog.i("Activity", "requestUsbDeviceAccess auto request debounced")
+            return
+        }
+        if (!showNoDeviceToast) {
+            lastAutoScanRequestMs = now
+        }
         val scanner = (application as OtgPictureReaderApp).appContainer.mtpImageScanner
         val device = scanner.findCandidateDevice()
         if (device == null) {
@@ -202,13 +252,17 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
+        pendingUsbAction = action
         if (scanner.hasPermission(device)) {
-            AppLog.i("Activity", "requestMtpScan permission already granted")
-            viewModel.scanMtpImages()
+            AppLog.i("Activity", "requestUsbDeviceAccess permission already granted action=$action")
+            when (action) {
+                PendingUsbAction.ScanImages -> viewModel.scanMtpImages()
+                PendingUsbAction.StartLiveView -> liveViewViewModel.startLiveView()
+            }
             return
         }
 
-        AppLog.i("Activity", "requestMtpScan request permission device=${device.deviceName}")
+        AppLog.i("Activity", "requestUsbDeviceAccess request permission device=${device.deviceName} action=$action")
         val intent = Intent(ACTION_USB_PERMISSION).apply {
             setPackage(packageName)
             putExtra(UsbManager.EXTRA_DEVICE, device)
@@ -241,6 +295,8 @@ private fun OtgPictureReaderApp(
     onShareImage: (Uri) -> Unit,
     onShareImages: (List<Uri>) -> Unit,
     onScanMtpDevice: () -> Unit,
+    liveViewViewModel: LiveViewViewModel,
+    onStartLiveView: () -> Unit,
     onStopCameraScan: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -252,6 +308,8 @@ private fun OtgPictureReaderApp(
     var showLogLocationPrompt by rememberSaveable {
         mutableStateOf(AppLog.shouldPromptForLogLocation(context))
     }
+    var showLogLimitPrompt by remember { mutableStateOf(false) }
+    var showLiveView by remember { mutableStateOf(false) }
     val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri == null) {
             AppLog.w("UI", "treePicker cancelled")
@@ -415,6 +473,23 @@ private fun OtgPictureReaderApp(
                                     }
                                 )
                                 DropdownMenuItem(
+                                    text = { Text("日志条数") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        showLogLimitPrompt = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("监视器 (Live View)") },
+                                    onClick = {
+                                        isSettingsMenuOpen = false
+                                        viewModel.closePreview()
+                                        viewModel.clearSelection()
+                                        showLiveView = true
+                                    },
+                                    enabled = !uiState.scanState.isScanning
+                                )
+                                DropdownMenuItem(
                                     text = { Text("清除当前来源") },
                                     onClick = {
                                         isSettingsMenuOpen = false
@@ -490,12 +565,63 @@ private fun OtgPictureReaderApp(
         )
     }
 
+    if (showLogLimitPrompt) {
+        LogLimitDialog(
+            currentLimit = AppLog.currentMaxLogEntries(),
+            onSave = { value ->
+                val normalized = AppLog.setMaxLogEntries(context, value)
+                showLogLimitPrompt = false
+                AppLog.i("UI", "log max entries changed to $normalized")
+                scope.launch {
+                    snackbarHostState.showSnackbar("日志最多保留 $normalized 条")
+                }
+            },
+            onDismiss = { showLogLimitPrompt = false }
+        )
+    }
+
     activeDialog?.let { dialog ->
         AppDialog(
             title = dialog.title,
             message = dialog.message,
             onDismiss = { activeDialog = null }
         )
+    }
+
+    // -- Live View 监视器全屏 --
+    if (showLiveView) {
+        val liveViewVm = liveViewViewModel
+        val liveViewState by liveViewVm.state.collectAsStateWithLifecycle()
+        val formattedParams = remember(liveViewState.params) {
+            liveViewVm.formatParams(liveViewState.params)
+        }
+        val closeLiveView = {
+            liveViewVm.stopLiveView()
+            showLiveView = false
+        }
+
+        BackHandler(enabled = true) {
+            closeLiveView()
+        }
+
+        DisposableEffect(Unit) {
+            onDispose {
+                liveViewVm.stopLiveView()
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxSize()) {
+            LiveViewScreen(
+                state = liveViewState,
+                formattedParams = formattedParams,
+                onStart = onStartLiveView,
+                onStop = { liveViewVm.stopLiveView() },
+                onAutofocus = { liveViewVm.autofocus() },
+                onCapture = { liveViewVm.autofocusAndCapture() },
+                onClose = closeLiveView,
+                onDismissError = { liveViewVm.dismissError() }
+            )
+        }
     }
 }
 
@@ -1079,6 +1205,54 @@ private fun LogLocationDialog(
         dismissButton = {
             TextButton(onClick = onUseInternal) {
                 Text("使用内部目录")
+            }
+        }
+    )
+}
+
+@Composable
+private fun LogLimitDialog(
+    currentLimit: Int,
+    onSave: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember(currentLimit) { mutableStateOf(currentLimit.toString()) }
+    val parsed = text.toIntOrNull()
+    val isValid = parsed != null && parsed >= 100
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("日志条数上限") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("日志会持续写入同一个 app.log，只保留最新的记录。")
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { value ->
+                        text = value.filter { it.isDigit() }.take(5)
+                    },
+                    singleLine = true,
+                    label = { Text("最多保留条数") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    isError = text.isNotBlank() && !isValid
+                )
+                Text(
+                    text = "建议 1000-5000，最低 100，最高 20000。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { parsed?.let(onSave) },
+                enabled = isValid
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
             }
         }
     )

@@ -16,11 +16,18 @@ object AppLog {
     private const val PREFS_NAME = "app_log_settings"
     private const val KEY_LOG_MODE = "log_mode"
     private const val KEY_LOG_TREE_URI = "log_tree_uri"
+    private const val KEY_LOG_DOCUMENT_URI = "log_document_uri"
+    private const val KEY_MAX_LOG_ENTRIES = "max_log_entries"
     private const val PREFS_CRASH_NAME = "app_crash_report"
     private const val KEY_LAST_CRASH = "last_crash"
     private const val MODE_INTERNAL = "internal"
     private const val MODE_EXTERNAL = "external"
+    private const val DEFAULT_MAX_LOG_ENTRIES = 2_000
+    private const val MIN_MAX_LOG_ENTRIES = 100
+    private const val MAX_MAX_LOG_ENTRIES = 20_000
+    private const val TRIM_BATCH_SIZE = 100
     private val timestampFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
+    private val writeLock = Any()
 
     @Volatile
     private var appContext: Context? = null
@@ -28,16 +35,26 @@ object AppLog {
     private var logFile: File? = null
     @Volatile
     private var logDocumentUri: Uri? = null
+    @Volatile
+    private var maxLogEntries: Int = DEFAULT_MAX_LOG_ENTRIES
 
     fun init(context: Context) {
         appContext = context.applicationContext
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val mode = prefs.getString(KEY_LOG_MODE, null)
         val treeUri = prefs.getString(KEY_LOG_TREE_URI, null)
+        val documentUri = prefs.getString(KEY_LOG_DOCUMENT_URI, null)
+        maxLogEntries = prefs.getInt(KEY_MAX_LOG_ENTRIES, DEFAULT_MAX_LOG_ENTRIES)
+            .coerceIn(MIN_MAX_LOG_ENTRIES, MAX_MAX_LOG_ENTRIES)
 
         if (mode == MODE_EXTERNAL) {
             if (treeUri != null) {
-                val restored = useExternalDirectory(context, Uri.parse(treeUri), persist = false)
+                val restored = useExternalDirectory(
+                    context = context,
+                    treeUri = Uri.parse(treeUri),
+                    persist = false,
+                    existingDocumentUri = documentUri?.let(Uri::parse)
+                )
                 if (restored.isSuccess) {
                     logI("AppLog", "initialized external log target: ${recentLogPath()}")
                     return
@@ -63,6 +80,19 @@ object AppLog {
         return prefs.getString(KEY_LOG_MODE, null) == null
     }
 
+    fun currentMaxLogEntries(): Int = maxLogEntries
+
+    fun setMaxLogEntries(context: Context, maxEntries: Int): Int {
+        val normalized = maxEntries.coerceIn(MIN_MAX_LOG_ENTRIES, MAX_MAX_LOG_ENTRIES)
+        maxLogEntries = normalized
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_MAX_LOG_ENTRIES, normalized)
+            .apply()
+        trimCurrentLog(force = true)
+        return normalized
+    }
+
     fun useInternalDirectory(context: Context, persist: Boolean = true): String {
         val dir = File(context.filesDir, "logs")
         if (!dir.exists()) {
@@ -71,22 +101,36 @@ object AppLog {
         logDocumentUri = null
         logFile = File(dir, LOG_FILE_NAME)
         if (persist) {
-            persistMode(context, MODE_INTERNAL, null)
+            persistMode(context, MODE_INTERNAL, treeUri = null, documentUri = null)
         }
+        trimCurrentLog(force = true)
         return logFile?.absolutePath.orEmpty()
     }
 
-    fun useExternalDirectory(context: Context, treeUri: Uri, persist: Boolean = true): Result<String> {
+    fun useExternalDirectory(
+        context: Context,
+        treeUri: Uri,
+        persist: Boolean = true,
+        existingDocumentUri: Uri? = null
+    ): Result<String> {
         val tree = DocumentFile.fromTreeUri(context, treeUri)
             ?: return Result.failure(IllegalStateException("无法访问所选目录"))
-        val existing = tree.listFiles().firstOrNull { it.name == LOG_FILE_NAME }
+        val existing = existingDocumentUri?.let { uri ->
+            DocumentFile.fromSingleUri(context, uri)?.takeIf { it.exists() && it.canWrite() }
+        } ?: tree.listFiles().firstOrNull { it.name == LOG_FILE_NAME }
         val logDocument = existing ?: tree.createFile("text/plain", LOG_FILE_NAME)
         return if (logDocument != null) {
             logFile = null
             logDocumentUri = logDocument.uri
             if (persist) {
-                persistMode(context, MODE_EXTERNAL, treeUri.toString())
+                persistMode(
+                    context = context,
+                    mode = MODE_EXTERNAL,
+                    treeUri = treeUri.toString(),
+                    documentUri = logDocument.uri.toString()
+                )
             }
+            trimCurrentLog(force = true)
             Result.success(logDocument.uri.toString())
         } else {
             Result.failure(IllegalStateException("无法在所选目录创建日志文件"))
@@ -123,7 +167,7 @@ object AppLog {
     private fun logI(section: String, message: String) = write(Log.INFO, section, message, null)
 
     private fun write(priority: Int, section: String, message: String, throwable: Throwable?) {
-        val line = buildLine(section, message)
+        val line = synchronized(writeLock) { buildLine(section, message) }
         when (priority) {
             Log.DEBUG -> Log.d(TAG, line, throwable)
             Log.INFO -> Log.i(TAG, line, throwable)
@@ -139,23 +183,27 @@ object AppLog {
     }
 
     private fun appendToFile(priority: Int, line: String, throwable: Throwable?) {
-        val entry = buildFileEntry(priority, line, throwable).toByteArray()
-        val file = logFile
-        val uri = logDocumentUri
-        if (file != null) {
-            runCatching {
-                file.appendBytes(entry)
+        synchronized(writeLock) {
+            val entry = buildFileEntry(priority, line, throwable)
+            val file = logFile
+            val uri = logDocumentUri
+            if (file != null) {
+                runCatching {
+                    file.appendText(entry)
+                    trimFileIfNeeded(file)
+                }
+                return
             }
-            return
-        }
-        if (uri != null) {
-            val context = appContext ?: return
-            runCatching {
-                context.contentResolver.openFileDescriptor(uri, "wa")?.use { pfd ->
-                    FileOutputStream(pfd.fileDescriptor).use { output ->
-                        output.write(entry)
-                        output.flush()
+            if (uri != null) {
+                val context = appContext ?: return
+                runCatching {
+                    context.contentResolver.openFileDescriptor(uri, "wa")?.use { pfd ->
+                        FileOutputStream(pfd.fileDescriptor).use { output ->
+                            output.write(entry.toByteArray())
+                            output.flush()
+                        }
                     }
+                    trimDocumentIfNeeded(context, uri)
                 }
             }
         }
@@ -172,11 +220,55 @@ object AppLog {
         return "$level $line$stack\n"
     }
 
-    private fun persistMode(context: Context, mode: String, treeUri: String?) {
+    private fun trimCurrentLog(force: Boolean) {
+        synchronized(writeLock) {
+            logFile?.let { file ->
+                runCatching { trimFileIfNeeded(file, force) }
+                return
+            }
+            val context = appContext ?: return
+            val uri = logDocumentUri ?: return
+            runCatching { trimDocumentIfNeeded(context, uri, force) }
+        }
+    }
+
+    private fun trimFileIfNeeded(file: File, force: Boolean = false) {
+        if (!file.exists()) return
+        val text = file.readText()
+        val trimmed = trimLogText(text, force) ?: return
+        file.writeText(trimmed)
+    }
+
+    private fun trimDocumentIfNeeded(context: Context, uri: Uri, force: Boolean = false) {
+        val resolver = context.contentResolver
+        val text = resolver.openInputStream(uri)?.use { input ->
+            input.bufferedReader().use { it.readText() }
+        } ?: return
+        val trimmed = trimLogText(text, force) ?: return
+        resolver.openFileDescriptor(uri, "rwt")?.use { pfd ->
+            FileOutputStream(pfd.fileDescriptor).use { output ->
+                output.write(trimmed.toByteArray())
+                output.flush()
+            }
+        }
+    }
+
+    private fun trimLogText(text: String, force: Boolean): String? {
+        if (text.isEmpty()) return null
+        val entryStarts = logEntryStartRegex.findAll(text).map { it.range.first }.toList()
+        val limit = maxLogEntries
+        val trimThreshold = if (force) limit else limit + TRIM_BATCH_SIZE
+        if (entryStarts.size <= trimThreshold) return null
+        val keepFrom = entryStarts[entryStarts.size - limit]
+        return text.substring(keepFrom)
+    }
+
+    private fun persistMode(context: Context, mode: String, treeUri: String?, documentUri: String?) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_LOG_MODE, mode)
             .putString(KEY_LOG_TREE_URI, treeUri)
+            .putString(KEY_LOG_DOCUMENT_URI, documentUri)
             .apply()
     }
 
@@ -185,6 +277,9 @@ object AppLog {
             .edit()
             .remove(KEY_LOG_MODE)
             .remove(KEY_LOG_TREE_URI)
+            .remove(KEY_LOG_DOCUMENT_URI)
             .apply()
     }
+
+    private val logEntryStartRegex = Regex("(?m)^[DIWE] \\[\\d{4}-\\d{2}-\\d{2} ")
 }
