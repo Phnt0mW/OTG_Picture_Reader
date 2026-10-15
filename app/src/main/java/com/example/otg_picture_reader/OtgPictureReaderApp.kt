@@ -14,6 +14,7 @@ class OtgPictureReaderApp : Application() {
     override fun onCreate() {
         super.onCreate()
         AppLog.init(this)
+        if (!AppLog.isEnabled) return
         previousUncaughtExceptionHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             val report = buildString {

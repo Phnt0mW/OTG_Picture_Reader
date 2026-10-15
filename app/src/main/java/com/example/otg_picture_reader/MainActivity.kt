@@ -41,8 +41,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -301,12 +303,13 @@ private fun OtgPictureReaderApp(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val galleryGridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var activeDialog by remember { mutableStateOf<AppDialogState?>(null) }
     var isSettingsMenuOpen by remember { mutableStateOf(false) }
     var showLogLocationPrompt by rememberSaveable {
-        mutableStateOf(AppLog.shouldPromptForLogLocation(context))
+        mutableStateOf(AppLog.isEnabled && AppLog.shouldPromptForLogLocation(context))
     }
     var showLogLimitPrompt by remember { mutableStateOf(false) }
     var showLiveView by remember { mutableStateOf(false) }
@@ -465,20 +468,22 @@ private fun OtgPictureReaderApp(
                                         viewModel.toggleSortOrder()
                                     }
                                 )
-                                DropdownMenuItem(
-                                    text = { Text("日志位置") },
-                                    onClick = {
-                                        isSettingsMenuOpen = false
-                                        showLogLocationPrompt = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("日志条数") },
-                                    onClick = {
-                                        isSettingsMenuOpen = false
-                                        showLogLimitPrompt = true
-                                    }
-                                )
+                                if (AppLog.isEnabled) {
+                                    DropdownMenuItem(
+                                        text = { Text("日志位置") },
+                                        onClick = {
+                                            isSettingsMenuOpen = false
+                                            showLogLocationPrompt = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("日志条数") },
+                                        onClick = {
+                                            isSettingsMenuOpen = false
+                                            showLogLimitPrompt = true
+                                        }
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("监视器 (Live View)") },
                                     onClick = {
@@ -524,6 +529,7 @@ private fun OtgPictureReaderApp(
         } else {
             GalleryScreen(
                 state = uiState,
+                gridState = galleryGridState,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding),
@@ -533,14 +539,16 @@ private fun OtgPictureReaderApp(
                 onRescanOtg = viewModel::scanImages,
                 onImageClick = { image ->
                     AppLog.d("UI", "gallery image click id=${image.id} selectionMode=${uiState.isSelectionMode}")
-                    viewModel.openImage(image.id)
+                    if (uiState.isSelectionMode) {
+                        viewModel.toggleImageSelection(image.id)
+                    } else {
+                        viewModel.openImage(image.id)
+                    }
                 },
                 onImageLongClick = { image ->
                     AppLog.d("UI", "gallery image longClick id=${image.id} selectionMode=${uiState.isSelectionMode}")
                     if (!uiState.isSelectionMode) {
-                        viewModel.selectOnly(image.id)
-                    } else {
-                        viewModel.toggleImageSelection(image.id)
+                        viewModel.enterSelectionMode()
                     }
                 },
                 onSaveSelected = viewModel::saveSelectedImages,
@@ -643,6 +651,7 @@ private fun rememberSourceName(rootUri: String?, isScanning: Boolean): String {
 @Composable
 private fun GalleryScreen(
     state: MainUiState,
+    gridState: LazyGridState,
     modifier: Modifier = Modifier,
     onPickRoot: () -> Unit,
     onScanMtpDevice: () -> Unit,
@@ -714,6 +723,7 @@ private fun GalleryScreen(
         } else {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 132.dp),
+                state = gridState,
                 modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)

@@ -27,11 +27,9 @@ data class MainUiState(
     val selectedImage: OtgImage? = null,
     val previewIndex: Int = -1,
     val selectedImageIds: Set<String> = emptySet(),
+    val isSelectionMode: Boolean = false,
     val previewError: String? = null
 ) {
-    val isSelectionMode: Boolean
-        get() = selectedImageIds.isNotEmpty()
-
     val selectedCount: Int
         get() = selectedImageIds.size
 }
@@ -50,6 +48,7 @@ class MainViewModel(
     private val sortDescending = MutableStateFlow(true)
     private val previewImageId = MutableStateFlow<String?>(null)
     private val selectedImageIds = MutableStateFlow<Set<String>>(emptySet())
+    private val selectionMode = MutableStateFlow(false)
     private val previewError = MutableStateFlow<String?>(null)
     private val _events = MutableSharedFlow<MainUiEvent>()
     val events = _events.asSharedFlow()
@@ -61,6 +60,7 @@ class MainViewModel(
         val selectedImage: OtgImage?,
         val previewIndex: Int,
         val selectedIds: Set<String>,
+        val isSelectionMode: Boolean,
         val previewError: String?
     )
 
@@ -88,8 +88,11 @@ class MainViewModel(
             selectedImage = selectedImage,
             previewIndex = sortedImages.indexOfFirst { it.id == previewId },
             selectedIds = selectedIds,
+            isSelectionMode = false,
             previewError = null
         )
+    }.combine(selectionMode) { displayState, isSelectionMode ->
+        displayState.copy(isSelectionMode = isSelectionMode)
     }.combine(previewError) { displayState, previewErrorMessage ->
         displayState.copy(previewError = previewErrorMessage)
     }.combine(repository.rootUri) { displayState, rootUri ->
@@ -101,6 +104,7 @@ class MainViewModel(
             selectedImage = displayState.selectedImage,
             previewIndex = displayState.previewIndex,
             selectedImageIds = displayState.selectedIds,
+            isSelectionMode = displayState.isSelectionMode,
             previewError = displayState.previewError
         )
     }.stateIn(
@@ -119,6 +123,7 @@ class MainViewModel(
         AppLog.i("ViewModel", "clearRootSelection")
         previewImageId.value = null
         selectedImageIds.value = emptySet()
+        selectionMode.value = false
         previewError.value = null
         repository.clearRootUri()
     }
@@ -196,6 +201,7 @@ class MainViewModel(
 
     fun toggleImageSelection(imageId: String) {
         AppLog.d("ViewModel", "toggleImageSelection imageId=$imageId")
+        selectionMode.value = true
         selectedImageIds.value = selectedImageIds.value.toMutableSet().apply {
             if (!add(imageId)) {
                 remove(imageId)
@@ -206,11 +212,12 @@ class MainViewModel(
     fun clearSelection() {
         AppLog.d("ViewModel", "clearSelection")
         selectedImageIds.value = emptySet()
+        selectionMode.value = false
     }
 
-    fun selectOnly(imageId: String) {
-        AppLog.d("ViewModel", "selectOnly imageId=$imageId")
-        selectedImageIds.value = setOf(imageId)
+    fun enterSelectionMode() {
+        AppLog.d("ViewModel", "enterSelectionMode")
+        selectionMode.value = true
     }
 
     fun toggleSelectionFromPreview() {

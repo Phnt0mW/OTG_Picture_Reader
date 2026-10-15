@@ -11,6 +11,8 @@ import java.util.Date
 import java.util.Locale
 
 object AppLog {
+    // Temporary master switch. Set to true to restore the existing logging system.
+    private const val ENABLED = false
     private const val TAG = "OTGReader"
     private const val LOG_FILE_NAME = "app.log"
     private const val PREFS_NAME = "app_log_settings"
@@ -38,7 +40,11 @@ object AppLog {
     @Volatile
     private var maxLogEntries: Int = DEFAULT_MAX_LOG_ENTRIES
 
+    val isEnabled: Boolean
+        get() = ENABLED
+
     fun init(context: Context) {
+        if (!ENABLED) return
         appContext = context.applicationContext
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val mode = prefs.getString(KEY_LOG_MODE, null)
@@ -76,6 +82,7 @@ object AppLog {
     }
 
     fun shouldPromptForLogLocation(context: Context): Boolean {
+        if (!ENABLED) return false
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return prefs.getString(KEY_LOG_MODE, null) == null
     }
@@ -84,6 +91,7 @@ object AppLog {
 
     fun setMaxLogEntries(context: Context, maxEntries: Int): Int {
         val normalized = maxEntries.coerceIn(MIN_MAX_LOG_ENTRIES, MAX_MAX_LOG_ENTRIES)
+        if (!ENABLED) return normalized
         maxLogEntries = normalized
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -94,6 +102,7 @@ object AppLog {
     }
 
     fun useInternalDirectory(context: Context, persist: Boolean = true): String {
+        if (!ENABLED) return ""
         val dir = File(context.filesDir, "logs")
         if (!dir.exists()) {
             dir.mkdirs()
@@ -113,6 +122,9 @@ object AppLog {
         persist: Boolean = true,
         existingDocumentUri: Uri? = null
     ): Result<String> {
+        if (!ENABLED) {
+            return Result.failure(IllegalStateException("日志系统当前已关闭"))
+        }
         val tree = DocumentFile.fromTreeUri(context, treeUri)
             ?: return Result.failure(IllegalStateException("无法访问所选目录"))
         val existing = existingDocumentUri?.let { uri ->
@@ -147,6 +159,7 @@ object AppLog {
     }
 
     fun storePendingCrashReport(context: Context, report: String) {
+        if (!ENABLED) return
         context.getSharedPreferences(PREFS_CRASH_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_LAST_CRASH, report)
@@ -154,6 +167,7 @@ object AppLog {
     }
 
     fun consumePendingCrashReport(context: Context): String? {
+        if (!ENABLED) return null
         val prefs = context.getSharedPreferences(PREFS_CRASH_NAME, Context.MODE_PRIVATE)
         val report = prefs.getString(KEY_LAST_CRASH, null)
         if (report != null) {
@@ -167,6 +181,7 @@ object AppLog {
     private fun logI(section: String, message: String) = write(Log.INFO, section, message, null)
 
     private fun write(priority: Int, section: String, message: String, throwable: Throwable?) {
+        if (!ENABLED) return
         val line = synchronized(writeLock) { buildLine(section, message) }
         when (priority) {
             Log.DEBUG -> Log.d(TAG, line, throwable)
