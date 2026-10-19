@@ -109,13 +109,13 @@ fun LiveViewScreen(
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "Nikon Live View 监视器",
+                    text = "Nikon 实时取景",
                     color = Color.White.copy(alpha = 0.7f),
                     style = MaterialTheme.typography.titleLarge
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "连接相机后点击「开始监视」",
+                    text = "连接相机后点击「开始取景」",
                     color = Color.White.copy(alpha = 0.4f),
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -137,7 +137,7 @@ fun LiveViewScreen(
             AlertDialog(
                 onDismissRequest = onDismissError,
                 title = {
-                    Text("无法启动监视器")
+                    Text("无法启动实时取景")
                 },
                 text = {
                     Text(state.errorMessage!!)
@@ -242,7 +242,7 @@ fun LiveViewScreen(
                     ),
                     shape = RoundedCornerShape(24.dp)
                 ) {
-                    Text("⏹ 停止监视")
+                    Text("⏹ 停止取景")
                 }
             } else if (!state.isConnecting) {
                 // 未运行：显示开始按钮
@@ -253,7 +253,7 @@ fun LiveViewScreen(
                     ),
                     shape = RoundedCornerShape(24.dp)
                 ) {
-                    Text("▶ 开始监视")
+                    Text("▶ 开始取景")
                 }
             }
 
