@@ -31,7 +31,7 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
-fun OTG_Picture_ReaderTheme(
+fun OtgPictureReaderTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     // Dynamic color is available on Android 12+
     dynamicColor: Boolean = true,

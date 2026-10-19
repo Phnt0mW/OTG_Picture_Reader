@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.BackHandler
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -63,6 +64,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SheetValue
@@ -94,7 +96,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
@@ -108,7 +113,7 @@ import com.example.otg_picture_reader.data.model.OtgImage
 import com.example.otg_picture_reader.data.model.ScanState
 import com.example.otg_picture_reader.feature.liveview.LiveViewScreen
 import com.example.otg_picture_reader.feature.liveview.LiveViewViewModel
-import com.example.otg_picture_reader.ui.theme.OTG_Picture_ReaderTheme
+import com.example.otg_picture_reader.ui.theme.OtgPictureReaderTheme
 import com.example.otg_picture_reader.util.AppLog
 import java.io.File
 import java.text.DecimalFormat
@@ -180,7 +185,7 @@ class MainActivity : ComponentActivity() {
         )
         enableEdgeToEdge()
         setContent {
-            OTG_Picture_ReaderTheme {
+            OtgPictureReaderTheme {
                 OtgPictureReaderApp(
                     viewModel = viewModel,
                     onShareImage = ::shareImage,
@@ -224,7 +229,7 @@ class MainActivity : ComponentActivity() {
     private fun requestLiveViewStart() {
         if (viewModel.uiState.value.scanState.isScanning) {
             AppLog.w("Activity", "requestLiveViewStart ignored: camera scan is running")
-            Toast.makeText(this, "相机扫描正在进行，请先停止扫描后再打开监视器", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "相机扫描正在进行，请先停止扫描后再打开实时取景", Toast.LENGTH_SHORT).show()
             return
         }
         requestUsbDeviceAccess(
@@ -281,12 +286,12 @@ class MainActivity : ComponentActivity() {
 
     private fun shareImage(uri: Uri) {
         AppLog.i("Activity", "shareImage uri=$uri")
-        startActivity(Intent.createChooser(MainViewModel.buildShareIntent(uri), "导入到其他应用"))
+        startActivity(Intent.createChooser(MainViewModel.buildShareIntent(uri), "分享图片"))
     }
 
     private fun shareImages(uris: List<Uri>) {
         AppLog.i("Activity", "shareImages count=${uris.size}")
-        startActivity(Intent.createChooser(MainViewModel.buildShareMultipleIntent(uris), "批量导入到其他应用"))
+        startActivity(Intent.createChooser(MainViewModel.buildShareMultipleIntent(uris), "批量分享图片"))
     }
 }
 
@@ -453,14 +458,16 @@ private fun OtgPictureReaderApp(
                                         treePicker.launch(null)
                                     }
                                 )
-                                DropdownMenuItem(
-                                    text = { Text(if (isOtgSource) "扫描相机" else "选择 OTG 后扫描") },
-                                    onClick = {
-                                        isSettingsMenuOpen = false
-                                        if (isOtgSource) onScanMtpDevice() else treePicker.launch(null)
-                                    },
-                                    enabled = !uiState.scanState.isScanning
-                                )
+                                if (isOtgSource) {
+                                    DropdownMenuItem(
+                                        text = { Text("扫描相机") },
+                                        onClick = {
+                                            isSettingsMenuOpen = false
+                                            onScanMtpDevice()
+                                        },
+                                        enabled = !uiState.scanState.isScanning
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text(if (uiState.sortDescending) "排序：最早在前" else "排序：最新在前") },
                                     onClick = {
@@ -485,7 +492,7 @@ private fun OtgPictureReaderApp(
                                     )
                                 }
                                 DropdownMenuItem(
-                                    text = { Text("监视器 (Live View)") },
+                                    text = { Text("实时取景（Live View）") },
                                     onClick = {
                                         isSettingsMenuOpen = false
                                         viewModel.closePreview()
@@ -495,7 +502,7 @@ private fun OtgPictureReaderApp(
                                     enabled = !uiState.scanState.isScanning
                                 )
                                 DropdownMenuItem(
-                                    text = { Text("清除当前来源") },
+                                    text = { Text("清除当前来源缓存") },
                                     onClick = {
                                         isSettingsMenuOpen = false
                                         viewModel.clearRootSelection()
@@ -640,9 +647,9 @@ private fun rememberSourceName(rootUri: String?, isScanning: Boolean): String {
         rootUri?.let { uri ->
             DocumentFile.fromTreeUri(context, Uri.parse(uri))?.name ?: "OTG 目录"
         } ?: if (isScanning) {
-            "相机正在读取"
+            "正在读取相机"
         } else {
-            "相机/PTP/MTP 设备"
+            "OTG Picture Reader"
         }
     }
 }
@@ -775,7 +782,7 @@ private fun StatusCard(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                text = "已遍历 ${scanState.scannedCount} 个文件，图片 ${scanState.indexedCount} 张",
+                text = "已扫描 ${scanState.scannedCount} 个文件 · 索引 ${scanState.indexedCount} 张图片",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -853,12 +860,7 @@ private fun ImageCard(
                     fontWeight = FontWeight.Medium
                 )
                 Text(
-                    text = formatTime(image.sortTime),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Text(
-                    text = formatSize(image.sizeBytes),
+                    text = "${formatTime(image.sortTime)} · ${formatSize(image.sizeBytes)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1434,16 +1436,40 @@ private fun SelectionBadge(
     modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = modifier,
+        modifier = modifier
+            .size(26.dp)
+            .semantics {
+                contentDescription = if (selected) "已选择" else "未选择"
+            },
         shape = CircleShape,
-        color = if (selected) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.45f)
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary
+        } else {
+            Color.Black.copy(alpha = 0.35f)
+        },
+        contentColor = if (selected) {
+            MaterialTheme.colorScheme.onPrimary
+        } else {
+            Color.White
+        },
+        border = if (selected) {
+            null
+        } else {
+            BorderStroke(1.5.dp, Color.White.copy(alpha = 0.9f))
+        }
     ) {
-        Text(
-            text = if (selected) "ON" else "...",
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            color = Color.White,
-            style = MaterialTheme.typography.labelSmall
-        )
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            if (selected) {
+                Text(
+                    text = "✓",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
     }
 }
 
@@ -1475,7 +1501,8 @@ private fun EmptyState(
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
             )
             if (isLoading) {
                 CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
@@ -1486,7 +1513,7 @@ private fun EmptyState(
                     Text(actionLabel)
                 }
                 if (secondaryActionLabel != null && onSecondaryAction != null) {
-                    Button(onClick = onSecondaryAction) {
+                    OutlinedButton(onClick = onSecondaryAction) {
                         Text(secondaryActionLabel)
                     }
                 }
@@ -1516,7 +1543,7 @@ private fun formatSize(sizeBytes: Long): String {
 private fun formatResolution(image: OtgImage): String {
     val width = image.width ?: image.exifInfo?.width
     val height = image.height ?: image.exifInfo?.height
-    return if (width != null && height != null) "$width x $height" else "未知"
+    return if (width != null && height != null) "$width × $height" else "未知"
 }
 
 private fun formatCameraModel(exifInfo: ImageExifInfo): String? {
@@ -1537,7 +1564,7 @@ private fun detailLine(label: String, value: String?): Pair<String, String>? {
 @Preview(showBackground = true)
 @Composable
 private fun EmptyStatePreview() {
-    OTG_Picture_ReaderTheme {
+    OtgPictureReaderTheme {
         EmptyState(
             title = "还没有连接到 OTG 目录",
             description = "先选择 OTG 设备目录，应用会扫描全部图片并优先生成缩略图。",
